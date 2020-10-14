@@ -127,14 +127,13 @@ impl<U: Send + Sync + Debug> StorageBackend<U> for Filesystem {
         .await
     }
 
-    async fn put<P: AsRef<Path> + Send, R: tokio::io::AsyncRead + Send + Sync + 'static + Unpin>(
-        &self,
-        _user: &Option<U>,
-        bytes: R,
-        path: P,
-        start_pos: u64,
-    ) -> Result<u64> {
+    async fn put<'a, P, R: ?Sized>(&self, _user: &Option<U>, bytes: &'a mut R, path: P, start_pos: u64) -> Result<u64>
+    where
+        R: tokio::io::AsyncRead + Unpin + Sync + Send,
+        P: AsRef<Path> + Send + Debug,
+    {
         use tokio::io::AsyncSeekExt;
+        use tokio::io::AsyncWriteExt;
         // TODO: Add permission checks
         let path = path.as_ref();
         let full_path = if path.starts_with("/") {
@@ -147,11 +146,14 @@ impl<U: Send + Sync + Debug> StorageBackend<U> for Filesystem {
         file.set_len(start_pos).await?;
         file.seek(std::io::SeekFrom::Start(start_pos)).await?;
 
-        let mut reader = tokio::io::BufReader::with_capacity(4096, bytes);
+        //let mut reader = tokio::io::BufReader::with_capacity(4096, bytes);
         let mut writer = tokio::io::BufWriter::with_capacity(4096, file);
 
-        let bytes_copied = tokio::io::copy(&mut reader, &mut writer).await?;
-        Ok(bytes_copied)
+        let res = tokio::io::copy( bytes, &mut writer).await;
+        writer.shutdown().await?;
+        writer.flush().await?;
+
+        return res.map_err(|error: std::io::Error| error.into());
     }
 
     #[tracing_attributes::instrument]

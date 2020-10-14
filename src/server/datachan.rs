@@ -11,11 +11,11 @@ use crate::{
     server::tls::new_config,
     storage::{Error, ErrorKind, Metadata, StorageBackend},
 };
-
 use futures::{
     channel::mpsc::{Receiver, Sender},
     prelude::*,
 };
+use rustls::ServerSession;
 use std::{path::PathBuf, sync::Arc};
 use tokio::io::AsyncWriteExt;
 use tokio_rustls::TlsAcceptor;
@@ -122,15 +122,44 @@ where
         }
     }
 
-    #[tracing_attributes::instrument]
+    //#[tracing_attributes::instrument]
     async fn exec_stor(self, path: String) {
         let path = self.cwd.join(path);
         let mut tx_ok = self.control_msg_tx.clone();
         let mut tx_error = self.control_msg_tx.clone();
-        let put_result = self
-            .storage
-            .put(&self.user, Self::reader(self.socket, self.ftps_mode).await, path, self.start_pos)
-            .await;
+        let mut socket = self.socket;
+        let put_result = match self.ftps_mode {
+            FTPSConfig::Off => {
+                slog::info!(self.logger, "Saving file in plaintext mode"; "path" => format!("{:?}", path));
+                self.storage.put(&self.user, &mut socket, path, self.start_pos).await
+            }
+            FTPSConfig::On { certs_file, key_file } => {
+                slog::info!(self.logger, "Saving file in FTPS mode"; "path" => format!("{:?}", path));
+                let mut io = async move {
+                    let acceptor: TlsAcceptor = new_config(certs_file, key_file).into();
+                    acceptor
+                        .accept_with(socket, |server_session: &mut ServerSession| server_session.reject_early_data())
+                        .await
+                        .unwrap()
+                }
+                .await;
+                let (io, session) = io.get_mut();
+                let (mut reader, mut writer) = tokio::io::split(io);
+                writer.shutdown().await;
+                let mut r = self.storage.put(&self.user, &mut reader, path.clone(), self.start_pos).await;
+                if let Err(ref e) = r {
+                    if Self::is_connection_reset(e) {
+                        slog::info!(self.logger, "Got connection reset");
+                        let len = self.storage.metadata(&self.user, path).await;
+                        match len {
+                            Ok(len) => r = Ok(len.len()),
+                            Err(e) => r = Err(e),
+                        }
+                    }
+                };
+                r
+            }
+        };
         match put_result {
             Ok(bytes) => {
                 if let Err(err) = tx_ok.send(InternalMsg::WrittenData { bytes: bytes as i64 }).await {
@@ -143,6 +172,17 @@ where
                 }
             }
         }
+    }
+
+    fn is_connection_reset(error: &Error) -> bool {
+        if let Some(e) = (error as &(dyn std::error::Error + 'static + Send)).source() {
+            if let Some(e) = e.downcast_ref::<std::io::Error>() {
+                if e.kind() == std::io::ErrorKind::ConnectionReset {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     #[tracing_attributes::instrument]
@@ -231,21 +271,6 @@ where
                 }
                 .await;
                 Box::new(io) as Box<dyn tokio::io::AsyncWrite + Send + Unpin + Sync>
-            }
-        }
-    }
-
-    #[tracing_attributes::instrument]
-    async fn reader(socket: tokio::net::TcpStream, ftps_mode: FTPSConfig) -> Box<dyn tokio::io::AsyncRead + Send + Unpin + Sync> {
-        match ftps_mode {
-            FTPSConfig::Off => Box::new(socket) as Box<dyn tokio::io::AsyncRead + Send + Unpin + Sync>,
-            FTPSConfig::On { certs_file, key_file } => {
-                let io = async move {
-                    let acceptor: TlsAcceptor = new_config(certs_file, key_file).into();
-                    acceptor.accept(socket).await.unwrap()
-                }
-                .await;
-                Box::new(io) as Box<dyn tokio::io::AsyncRead + Send + Unpin + Sync>
             }
         }
     }
