@@ -1,6 +1,6 @@
 #![deny(clippy::all)]
 #![deny(missing_docs)]
-#![forbid(unsafe_code)]
+//#![forbid(unsafe_code)]
 
 //! libunftp is an extensible, async, cloud orientated FTP(S) server library.
 //!

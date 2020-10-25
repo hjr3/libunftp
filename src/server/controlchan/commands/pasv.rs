@@ -131,6 +131,25 @@ impl Pasv {
             // We cannot await this since we first need to let the client know where to connect :-)
             tokio::spawn(async move {
                 if let Ok((socket, _socket_addr)) = listener.accept().await {
+                    use std::os::unix::io::{AsRawFd, RawFd};
+                    let raw_fd: RawFd = socket.as_raw_fd();
+
+                    let ret = unsafe {
+                        let optval = libc::linger{
+                            l_onoff: 1,
+                            l_linger: 60*10,
+                        };
+                        libc::setsockopt(
+                            raw_fd,
+                            libc::SOL_SOCKET,
+                            libc::SO_LINGER,
+                            &optval as *const _ as *const libc::c_void,
+                            std::mem::size_of_val(&optval) as libc::socklen_t,
+                        )
+                    };
+                    if ret != 0 {
+                        slog::error!(logger, "could not set linger option on data socket");
+                    }
                     datachan::spawn_processing(logger, session, socket).await;
                 }
             });
