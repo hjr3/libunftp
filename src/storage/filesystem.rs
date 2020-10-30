@@ -149,11 +149,38 @@ impl<U: Send + Sync + Debug> StorageBackend<U> for Filesystem {
         //let mut reader = tokio::io::BufReader::with_capacity(4096, bytes);
         let mut writer = tokio::io::BufWriter::with_capacity(4096, file);
 
-        let res = tokio::io::copy( bytes, &mut writer).await;
-        writer.shutdown().await?;
-        writer.flush().await?;
+        let mut res = tokio::io::copy( bytes, &mut writer).await.map_err(|error: std::io::Error| error.into());
+        let mut flused = false;
+        if let Err(ref e) = res {
+            if is_connection_reset(e) {
+                writer.shutdown().await?;
+                writer.flush().await?;
+                flused = true;
+                let len = self.metadata(&_user, path).await;
+                match len {
+                    Ok(len) => res = Ok(len.len()),
+                    Err(e) => res = Err(e),
+                }
+            }
+        };
 
-        return res.map_err(|error: std::io::Error| error.into());
+        fn is_connection_reset(error: &Error) -> bool {
+            if let Some(e) = (error as &(dyn std::error::Error + 'static + Send)).source() {
+                if let Some(e) = e.downcast_ref::<std::io::Error>() {
+                    if e.kind() == std::io::ErrorKind::ConnectionReset {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+
+        if !flused {
+            writer.shutdown().await?;
+            writer.flush().await?;
+        }
+
+        return res;
     }
 
     #[tracing_attributes::instrument]

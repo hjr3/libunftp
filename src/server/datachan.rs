@@ -147,16 +147,6 @@ where
                 let (mut reader, mut writer) = tokio::io::split(io);
                 writer.shutdown().await;
                 let mut r = self.storage.put(&self.user, &mut reader, path.clone(), self.start_pos).await;
-                if let Err(ref e) = r {
-                    if Self::is_connection_reset(e) {
-                        slog::info!(self.logger, "Got connection reset");
-                        let len = self.storage.metadata(&self.user, path).await;
-                        match len {
-                            Ok(len) => r = Ok(len.len()),
-                            Err(e) => r = Err(e),
-                        }
-                    }
-                };
                 r
             }
         };
@@ -172,17 +162,6 @@ where
                 }
             }
         }
-    }
-
-    fn is_connection_reset(error: &Error) -> bool {
-        if let Some(e) = (error as &(dyn std::error::Error + 'static + Send)).source() {
-            if let Some(e) = e.downcast_ref::<std::io::Error>() {
-                if e.kind() == std::io::ErrorKind::ConnectionReset {
-                    return true;
-                }
-            }
-        }
-        false
     }
 
     #[tracing_attributes::instrument]
